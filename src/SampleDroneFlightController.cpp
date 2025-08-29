@@ -26,7 +26,9 @@ class SampleDroneFlightController : public cnoid::SimpleController
 public:
     virtual bool configure(cnoid::SimpleControllerConfig* config) override;
     virtual bool initialize(cnoid::SimpleControllerIO* io) override;
+    virtual bool start() override;
     virtual bool control() override;
+    virtual void stop() override;
     virtual void unconfigure() override;
 
 private:
@@ -51,6 +53,8 @@ private:
     std::thread executorThread;
     std::mutex commandMutex;
     std::mutex batteryMutex;
+    std::string topic_name;
+    std::string controller_name;
 
     cnoid::Vector4 getZRPY();
     cnoid::Vector2 getXY();
@@ -60,19 +64,7 @@ CNOID_IMPLEMENT_SIMPLE_CONTROLLER_FACTORY(SampleDroneFlightController)
 
 bool SampleDroneFlightController::configure(cnoid::SimpleControllerConfig* config)
 {
-    node = std::make_shared<rclcpp::Node>(config->controllerName());
-
-    publisher = node->create_publisher<sensor_msgs::msg::BatteryState>("/battery_status", 10);
-    subscription = node->create_subscription<geometry_msgs::msg::Twist>(
-        "/cmd_vel", 1, [this](const geometry_msgs::msg::Twist::SharedPtr msg) {
-            std::lock_guard<std::mutex> lock(commandMutex);
-            command = *msg;
-        });
-
-    executor = std::make_unique<rclcpp::executors::StaticSingleThreadedExecutor>();
-    executor->add_node(node);
-    executorThread = std::thread([this]() { executor->spin(); });
-
+    controller_name = config->controllerName();
     return true;
 }
 
@@ -83,6 +75,20 @@ bool SampleDroneFlightController::initialize(cnoid::SimpleControllerIO* io)
     rotors = io->body()->devices();
     gyroSensor = ioBody->findDevice<cnoid::RateGyroSensor>("GyroSensor");
     is_powered_on = true;
+
+    topic_name.clear();
+    bool is_topic = false;
+    for(auto opt : io->options()) {
+        if(opt == "topic") {
+            is_topic = true;
+        } else if(is_topic) {
+            topic_name = opt;
+            break;
+        }
+    }
+    if(topic_name.empty()) {
+        topic_name = "cmd_vel";
+    }
 
     io->enableInput(ioBody->rootLink(), cnoid::Link::LinkPosition);
     io->enableInput(gyroSensor);
@@ -98,6 +104,24 @@ bool SampleDroneFlightController::initialize(cnoid::SimpleControllerIO* io)
 
     timeStep = io->timeStep();
     time = durationn = 60.0 * 40.0;
+
+    return true;
+}
+
+bool SampleDroneFlightController::start()
+{
+    node = std::make_shared<rclcpp::Node>(controller_name);
+
+    publisher = node->create_publisher<sensor_msgs::msg::BatteryState>("/battery_status", 10);
+    subscription = node->create_subscription<geometry_msgs::msg::Twist>(
+        topic_name, 1, [this](const geometry_msgs::msg::Twist::SharedPtr msg) {
+            std::lock_guard<std::mutex> lock(commandMutex);
+            command = *msg;
+        });
+
+    executor = std::make_unique<rclcpp::executors::StaticSingleThreadedExecutor>();
+    executor->add_node(node);
+    executorThread = std::thread([this]() { executor->spin(); });
 
     return true;
 }
@@ -178,10 +202,10 @@ bool SampleDroneFlightController::control()
     dxprev = dx;
 
     static const double TD[4][4] = {
-        {1.0, -1.0, -1.0, -1.0},
-        {1.0,  1.0, -1.0,  1.0},
-        {1.0,  1.0,  1.0, -1.0},
-        {1.0, -1.0,  1.0,  1.0}
+        { 1.0, -1.0, -1.0, -1.0 },
+        { 1.0,  1.0, -1.0,  1.0 },
+        { 1.0,  1.0,  1.0, -1.0 },
+        { 1.0, -1.0,  1.0,  1.0 }
     };
     static const double ATD[] = { -1.0, 1.0, -1.0, 1.0 };
 
@@ -214,7 +238,7 @@ bool SampleDroneFlightController::control()
     return true;
 }
 
-void SampleDroneFlightController::unconfigure()
+void SampleDroneFlightController::stop()
 {
     if(executor) {
         executor->cancel();
@@ -222,6 +246,10 @@ void SampleDroneFlightController::unconfigure()
         executor->remove_node(node);
         executor.reset();
     }
+}
+
+void SampleDroneFlightController::unconfigure()
+{
 }
 
 cnoid::Vector4 SampleDroneFlightController::getZRPY()
