@@ -10,6 +10,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <sensor_msgs/msg/battery_state.hpp>
+#include <std_msgs/msg/empty.hpp>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -48,11 +49,14 @@ private:
     rclcpp::Node::SharedPtr node;
     rclcpp::Publisher<sensor_msgs::msg::BatteryState>::SharedPtr publisher;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr subscription;
+    rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr sub_arm;
+    rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr sub_disarm;
     geometry_msgs::msg::Twist command;
     rclcpp::executors::StaticSingleThreadedExecutor::UniquePtr executor;
     std::thread executorThread;
     std::mutex commandMutex;
     std::mutex batteryMutex;
+    std::mutex powerMutex;
     std::string topic_name;
     std::string controller_name;
 
@@ -123,6 +127,23 @@ bool SampleDroneFlightController::start()
     executor->add_node(node);
     executorThread = std::thread([this]() { executor->spin(); });
 
+    // Arm / Disarm control topics
+    sub_arm = node->create_subscription<std_msgs::msg::Empty>(
+        "/drone/arm", 1, [this](const std_msgs::msg::Empty::SharedPtr){
+            std::lock_guard<std::mutex> lock(powerMutex);
+            is_powered_on = true;
+            // If battery time ran out, reset to full duration to allow flight
+            if(time <= 0.0){
+                time = durationn;
+            }
+        });
+
+    sub_disarm = node->create_subscription<std_msgs::msg::Empty>(
+        "/drone/disarm", 1, [this](const std_msgs::msg::Empty::SharedPtr){
+            std::lock_guard<std::mutex> lock(powerMutex);
+            is_powered_on = false;
+        });
+
     return true;
 }
 
@@ -167,6 +188,7 @@ bool SampleDroneFlightController::control()
     double gfcoef = ioBody->mass() * 9.80665 / 4.0 / cc;
 
     if((fabs(cnoid::degree(z[1])) > 45.0) || (fabs(cnoid::degree(z[2])) > 45.0)) {
+        std::lock_guard<std::mutex> lock(powerMutex);
         is_powered_on = false;
     }
 
@@ -218,8 +240,11 @@ bool SampleDroneFlightController::control()
         rotor->notifyStateChange();
     }
 
-    if(is_powered_on) {
-        time -= timeStep;
+    {
+        std::lock_guard<std::mutex> lock(powerMutex);
+        if(is_powered_on) {
+            time -= timeStep;
+        }
     }
     double percentage = time / durationn * 100.0;
 
@@ -232,6 +257,7 @@ bool SampleDroneFlightController::control()
     }
 
     if(percentage <= 0.0) {
+        std::lock_guard<std::mutex> lock(powerMutex);
         is_powered_on = false;
     }
 
